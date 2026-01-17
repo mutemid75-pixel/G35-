@@ -1,0 +1,393 @@
+import os
+
+# Root project folder
+root = "MonsterStudy"
+
+# Folder structure
+folders = [
+    ".github/workflows",
+    "app/src/main/java/com/monster/study",
+    "app/src/main/res",
+]
+
+for f in folders:
+    os.makedirs(os.path.join(root, f), exist_ok=True)
+
+# Full single-file MonsterActivity.kt code
+monster_kotlin_code = """
+package com.monster.study
+
+import android.Manifest
+import android.app.*
+import android.content.*
+import android.os.*
+import android.speech.tts.TextToSpeech
+import android.view.*
+import android.widget.*
+import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import com.google.gson.Gson
+import kotlinx.coroutines.*
+import org.apache.pdfbox.pdmodel.PDDocument
+import org.apache.pdfbox.text.PDFTextStripper
+import org.apache.poi.xwpf.usermodel.XWPFDocument
+import java.io.File
+import java.io.FileInputStream
+import java.util.*
+import kotlin.collections.ArrayList
+
+class MonsterActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
+
+    // UI
+    private lateinit var startBtn: Button
+    private lateinit var pauseBtn: Button
+    private lateinit var languageBtn: Button
+    private lateinit var quizBtn: Button
+    private lateinit var recyclerView: RecyclerView
+    private lateinit var ttsStatus: TextView
+
+    // Engines
+    private lateinit var ttsController: TTSController
+    private lateinit var highlightManager: HighlightManager
+    private lateinit var recapEngine: RecapEngine
+    private lateinit var clozeEngine: ClozeEngine
+    private lateinit var mcqEngine: MCQEngine
+    private lateinit var progressTracker: ProgressTracker
+    private lateinit var studyPlanner: StudyPlanner
+    private lateinit var voiceCommandEngine: VoiceCommandEngine
+
+    // Document data
+    private var paragraphs = ArrayList<Paragraph>()
+
+    // Coroutine scope
+    private val scope = CoroutineScope(Dispatchers.Main)
+
+    // Permissions
+    private val PERMISSIONS = arrayOf(
+        Manifest.permission.READ_EXTERNAL_STORAGE,
+        Manifest.permission.RECORD_AUDIO,
+        Manifest.permission.POST_NOTIFICATIONS
+    )
+    private val REQUEST_CODE = 101
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        ActivityCompat.requestPermissions(this, PERMISSIONS, REQUEST_CODE)
+
+        // Build UI programmatically
+        val layout = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(8,8,8,8) }
+        val buttonLayout = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+
+        startBtn = Button(this).apply { text="Start Reading" }
+        pauseBtn = Button(this).apply { text="Pause" }
+        languageBtn = Button(this).apply { text="Language" }
+        quizBtn = Button(this).apply { text="Quiz Me" }
+
+        buttonLayout.addView(startBtn)
+        buttonLayout.addView(pauseBtn)
+        buttonLayout.addView(languageBtn)
+        buttonLayout.addView(quizBtn)
+        layout.addView(buttonLayout)
+
+        ttsStatus = TextView(this).apply { text="TTS Ready" }
+        layout.addView(ttsStatus)
+
+        recyclerView = RecyclerView(this).apply { layoutManager = LinearLayoutManager(this@MonsterActivity) }
+        layout.addView(recyclerView, LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+
+        setContentView(layout)
+
+        // Initialize engines
+        ttsController = TTSController(this, this)
+        highlightManager = HighlightManager(this)
+        recapEngine = RecapEngine()
+        clozeEngine = ClozeEngine()
+        mcqEngine = MCQEngine()
+        progressTracker = ProgressTracker(this)
+        studyPlanner = StudyPlanner(this)
+        voiceCommandEngine = VoiceCommandEngine()
+
+        // Load document placeholder
+        loadSampleDocument()
+
+        // RecyclerView
+        recyclerView.adapter = ParagraphAdapter(paragraphs, highlightManager)
+
+        // Button actions
+        startBtn.setOnClickListener { startReading() }
+        pauseBtn.setOnClickListener { pauseReading() }
+        languageBtn.setOnClickListener { ttsController.toggleLanguage() }
+        quizBtn.setOnClickListener { startQuiz() }
+    }
+
+    private fun loadSampleDocument() {
+        paragraphs.clear()
+        val text = ("Monster v2.0 is your AI study assistant. " +
+                "Supports highlights, MCQs, Cloze tests, recaps, voice commands, and progress tracking.").split(". ")
+        for(p in text) paragraphs.add(Paragraph(p))
+    }
+
+    private var readingJob: Job? = null
+    private fun startReading() {
+        readingJob?.cancel()
+        readingJob = scope.launch {
+            for((i, paragraph) in paragraphs.withIndex()) {
+                if(!isActive) break
+                recyclerView.scrollToPosition(i)
+                ttsController.speak(paragraph.text)
+                progressTracker.markRead(i)
+                delay(3000)
+            }
+        }
+    }
+
+    private fun pauseReading() { readingJob?.cancel() }
+
+    private fun startQuiz() {
+        val questions = mcqEngine.generateMCQs(paragraphs, highlightManager)
+        QuizDialog(this, questions) { score ->
+            Toast.makeText(this, "Score: $score/${questions.size}", Toast.LENGTH_SHORT).show()
+            progressTracker.recordQuiz(score)
+        }.show()
+    }
+
+    override fun onInit(status: Int) {
+        ttsStatus.text = if(status == TextToSpeech.SUCCESS) "TTS Ready" else "TTS Init Failed"
+    }
+
+    override fun onDestroy() {
+        ttsController.shutdown()
+        scope.cancel()
+        super.onDestroy()
+    }
+
+    // ----------------------- Classes ------------------------
+
+    data class Paragraph(var text: String, var highlightColor: Int = 0)
+
+    inner class ParagraphAdapter(private val paragraphs: List<Paragraph>, private val highlightManager: HighlightManager)
+        : RecyclerView.Adapter<ParagraphAdapter.ParagraphViewHolder>() {
+
+        inner class ParagraphViewHolder(val tv: TextView) : RecyclerView.ViewHolder(tv)
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int) = ParagraphViewHolder(TextView(parent.context).apply { textSize=18f; setPadding(8,8,8,8) })
+
+        override fun onBindViewHolder(holder: ParagraphViewHolder, position: Int) {
+            val p = paragraphs[position]
+            holder.tv.text = p.text
+            holder.tv.setBackgroundColor(p.highlightColor)
+            holder.tv.setOnClickListener { highlightManager.toggleHighlight(p); notifyItemChanged(position) }
+        }
+
+        override fun getItemCount() = paragraphs.size
+    }
+
+    inner class HighlightManager(val context: Context) {
+        fun toggleHighlight(p: Paragraph) { p.highlightColor = if(p.highlightColor==0) 0xFFFFFF00.toInt() else 0 }
+    }
+
+    inner class TTSController(val context: Context, val listener: TextToSpeech.OnInitListener) {
+        private var tts: TextToSpeech = TextToSpeech(context, listener)
+        private var langIndex=0
+        private val languages=listOf(Locale.ENGLISH, Locale.FRENCH, Locale("es"))
+        fun speak(text:String) { tts.language=languages[langIndex]; tts.speak(text, TextToSpeech.QUEUE_FLUSH,null,"MonsterUtterance") }
+        fun toggleLanguage() { langIndex=(langIndex+1)%languages.size; ttsStatus.text="Language: ${languages[langIndex].displayLanguage}" }
+        fun shutdown() { tts.stop(); tts.shutdown() }
+    }
+
+    inner class RecapEngine { fun recap(pars: List<Paragraph>) = pars.joinToString(". ") { it.text.take(50)+"..." } }
+
+    inner class ClozeEngine {
+        fun generateCloze(p: Paragraph): String {
+            val words=p.text.split(" ")
+            if(words.isEmpty()) return p.text
+            val blanks=(0 until words.size).shuffled().take(minOf(2, words.size))
+            return words.mapIndexed{i,w->if(blanks.contains(i)) "____" else w}.joinToString(" ")
+        }
+    }
+
+    inner class MCQEngine {
+        data class Question(val question:String, val options:List<String>, val answer:String)
+        fun generateMCQs(pars: List<Paragraph>, highlightManager: HighlightManager): List<Question> {
+            val questions=ArrayList<Question>()
+            for(p in pars) {
+                val key = p.text.split(" ").firstOrNull() ?: continue
+                val distractors=listOf("OptionA","OptionB","OptionC")
+                val options=(listOf(key)+distractors).shuffled()
+                questions.add(Question("Select the key term:", options,key))
+            }
+            return questions
+        }
+    }
+
+    inner class ProgressTracker(val context: Context) {
+        private val gson=Gson()
+        private val prefs=context.getSharedPreferences("MonsterData", Context.MODE_PRIVATE)
+        fun markRead(index:Int){ saveData() }
+        fun recordQuiz(score:Int){ saveData() }
+        private fun saveData() { prefs.edit().putString("progress", gson.toJson(paragraphs)).apply() }
+    }
+
+    inner class StudyPlanner(val context: Context){
+        fun scheduleBreak(minutes:Int){
+            val am=context.getSystemService(ALARM_SERVICE) as AlarmManager
+            val intent=Intent(context,BreakReceiver::class.java)
+            val pending=PendingIntent.getBroadcast(context,0,intent,PendingIntent.FLAG_IMMUTABLE)
+            am.set(AlarmManager.RTC_WAKEUP,System.currentTimeMillis()+minutes*60000,pending)
+        }
+    }
+
+    class BreakReceiver:BroadcastReceiver(){
+        override fun onReceive(context: Context?, intent: Intent?) { Toast.makeText(context,"Time for a break!",Toast.LENGTH_LONG).show() }
+    }
+
+    inner class VoiceCommandEngine {
+        fun parseCommand(cmd: String) {
+            when {
+                cmd.contains("highlight", true) -> Toast.makeText(this@MonsterActivity,"Highlight command detected",Toast.LENGTH_SHORT).show()
+                cmd.contains("quiz", true) -> startQuiz()
+                cmd.contains("recap", true) -> Toast.makeText(this@MonsterActivity,recapEngine.recap(paragraphs),Toast.LENGTH_LONG).show()
+                cmd.contains("paraphrase", true) -> Toast.makeText(this@MonsterActivity,"Paraphrase command detected",Toast.LENGTH_SHORT).show()
+                cmd.contains("language", true) -> ttsController.toggleLanguage()
+            }
+        }
+    }
+
+    class QuizDialog(context: Context, val questions: List<MCQEngine.Question>, val callback: (Int)->Unit): Dialog(context){
+        override fun onCreate(savedInstanceState: Bundle?) {
+            super.onCreate(savedInstanceState)
+            val layout=LinearLayout(context).apply { orientation=LinearLayout.VERTICAL; setPadding(16,16,16,16) }
+            var score=0
+            for(q in questions){
+                val tv=TextView(context).apply { text=q.question }
+                layout.addView(tv)
+                for(opt in q.options){
+                    val btn=Button(context).apply { text=opt }
+                    btn.setOnClickListener{ if(opt==q.answer) score++ }
+                    layout.addView(btn)
+                }
+            }
+            val submit=Button(context).apply { text="Submit Quiz" }
+            submit.setOnClickListener{ callback(score); dismiss() }
+            layout.addView(submit)
+            setContentView(layout)
+        }
+    }
+
+    fun loadPDF(file: File) {
+        val doc=PDDocument.load(file)
+        val stripper=PDFTextStripper()
+        val text=stripper.getText(doc)
+        paragraphs.clear()
+        for(p in text.split("\\n\\n")) paragraphs.add(Paragraph(p))
+        doc.close()
+        recyclerView.adapter?.notifyDataSetChanged()
+    }
+
+    fun loadDOCX(file: File) {
+        val fis=FileInputStream(file)
+        val doc=XWPFDocument(fis)
+        paragraphs.clear()
+        for(p in doc.paragraphs) paragraphs.add(Paragraph(p.text))
+        fis.close()
+        recyclerView.adapter?.notifyDataSetChanged()
+    }
+
+    fun loadTXT(file: File) {
+        val text=file.readText()
+        paragraphs.clear()
+        for(p in text.split("\\n\\n")) paragraphs.add(Paragraph(p))
+        recyclerView.adapter?.notifyDataSetChanged()
+    }
+}
+"""
+
+# Files with content
+files = {
+    "app/src/main/java/com/monster/study/MonsterActivity.kt": monster_kotlin_code,
+    "app/src/main/AndroidManifest.xml": """<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.monster.study">
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <application
+        android:allowBackup="true"
+        android:label="Monster"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.AppCompat.Light.NoActionBar">
+        <activity
+            android:name=".MonsterActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>""",
+    "build.gradle": """buildscript {
+    repositories { google(); mavenCentral() }
+    dependencies { classpath "com.android.tools.build:gradle:8.2.0" }
+}
+allprojects { repositories { google(); mavenCentral() } }""",
+    "settings.gradle": """rootProject.name = "MonsterStudy"
+include ':app'""",
+    "app/build.gradle": """plugins { id 'com.android.application' }
+android {
+    namespace 'com.monster.study'
+    compileSdk 34
+    defaultConfig {
+        applicationId "com.monster.study"
+        minSdk 26
+        targetSdk 34
+        versionCode 2
+        versionName "2.0"
+    }
+    buildTypes { release { minifyEnabled false } }
+}
+dependencies {
+    implementation "androidx.appcompat:appcompat:1.7.0"
+    implementation "androidx.recyclerview:recyclerview:1.3.0"
+    implementation "org.apache.pdfbox:pdfbox-android:2.0.27.0"
+    implementation "org.apache.poi:poi-ooxml:5.2.5"
+    implementation "com.google.code.gson:gson:2.10.1"
+}""",
+    ".github/workflows/android-build.yml": """name: Build Monster APK
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Grant execute permission for Gradle
+        run: chmod +x ./gradlew
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Monster-v2.0-APK
+          path: app/build/outputs/apk/debug/app-debug.apk"""
+}
+
+# Write all files
+for path, content in files.items():
+    full_path = os.path.join(root, path)
+    os.makedirs(os.path.dirname(full_path), exist_ok=True)
+    with open(full_path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+print(f"MonsterStudy project generated in folder '{root}'. Push this to GitHub and your APK will build automatically!")
